@@ -1,11 +1,48 @@
-name: Test workflow
+name: Build FF2 DLSS5 format bridge
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
-  test:
+  build:
     runs-on: windows-latest
+
     steps:
-      - name: Test
-        run: echo "GitHub Actions is working"
+      - name: Check out build project
+        uses: actions/checkout@v4
+
+      - name: Clone upstream helper
+        shell: pwsh
+        run: git clone --depth 1 https://github.com/NIGos/dlss5-d3d12-fix.git upstream
+
+      - name: Apply FF2 source patch
+        shell: pwsh
+        run: python patch_source.py upstream/src/dlss5-d3d12-fix.cpp
+
+      - name: Build x64 add-on
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "Visual Studio C++ build tools not found." }
+          $devcmd = Join-Path $vs "Common7\Tools\VsDevCmd.bat"
+          $src = (Resolve-Path "upstream\src").Path
+          $cmd = "`"$devcmd`" -arch=amd64 -host_arch=amd64 && cd /d `"$src`" && rc /nologo version.rc && cl /nologo /LD /EHsc /O2 /MT dlss5-d3d12-fix.cpp /link /OUT:ff2-dlss5-format-fix.addon64 version.res kernel32.lib user32.lib"
+          cmd.exe /d /s /c $cmd
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item upstream\src\ff2-dlss5-format-fix.addon64 artifact\
+          Copy-Item dlss5-d3d12-fix.cfg artifact\
+          Copy-Item INSTALL.txt artifact\
+          Get-FileHash artifact\ff2-dlss5-format-fix.addon64 -Algorithm SHA256 | Format-List | Out-File artifact\SHA256.txt
+
+      - name: Upload compiled add-on
+        uses: actions/upload-artifact@v4
+        with:
+          name: FF2-DLSS5-format9-test
+          path: artifact
+          if-no-files-found: error
