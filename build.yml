@@ -1,48 +1,40 @@
-name: Build FF2 DLSS5 format bridge
+name: Build FF2 DLSS5 v4 diagnostic
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
-      - name: Check out build project
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Clone upstream helper
-        shell: pwsh
+      - name: Clone helper
         run: git clone --depth 1 https://github.com/NIGos/dlss5-d3d12-fix.git upstream
 
-      - name: Apply FF2 source patch
-        shell: pwsh
+      - name: Clone ReShade headers
+        run: git clone --depth 1 https://github.com/crosire/reshade.git reshade
+
+      - name: Patch source
         run: python patch_source.py upstream/src/dlss5-d3d12-fix.cpp
 
-      - name: Build x64 add-on
-        shell: pwsh
+      - name: Build
+        shell: cmd
         run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw "Visual Studio C++ build tools not found." }
-          $devcmd = Join-Path $vs "Common7\Tools\VsDevCmd.bat"
-          $src = (Resolve-Path "upstream\src").Path
-          $cmd = "`"$devcmd`" -arch=amd64 -host_arch=amd64 && cd /d `"$src`" && rc /nologo version.rc && cl /nologo /LD /EHsc /O2 /MT dlss5-d3d12-fix.cpp /link /OUT:ff2-dlss5-format-fix.addon64 version.res kernel32.lib user32.lib"
-          cmd.exe /d /s /c $cmd
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VS=%%i
+          call "%VS%\Common7\Tools\VsDevCmd.bat" -arch=x64
+          cd upstream\src
+          rc /nologo version.rc
+          cl /nologo /std:c++17 /LD /EHsc /O2 /MT /I..\..\reshade\include dlss5-d3d12-fix.cpp /link /OUT:ff2-dlss5-format-fix.addon64 version.res kernel32.lib user32.lib
 
-      - name: Stage artifact
-        shell: pwsh
+      - name: Stage
+        shell: powershell
         run: |
-          New-Item -ItemType Directory -Force -Path artifact | Out-Null
-          Copy-Item upstream\src\ff2-dlss5-format-fix.addon64 artifact\
-          Copy-Item dlss5-d3d12-fix.cfg artifact\
-          Copy-Item INSTALL.txt artifact\
-          Get-FileHash artifact\ff2-dlss5-format-fix.addon64 -Algorithm SHA256 | Format-List | Out-File artifact\SHA256.txt
+          New-Item -ItemType Directory -Force stage | Out-Null
+          Copy-Item upstream/src/ff2-dlss5-format-fix.addon64 stage/
+          if (Test-Path dlss5-d3d12-fix.cfg) { Copy-Item dlss5-d3d12-fix.cfg stage/ }
 
-      - name: Upload compiled add-on
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: FF2-DLSS5-format9-test
-          path: artifact
-          if-no-files-found: error
+          name: FF2-DLSS5-v4-viewdiag
+          path: stage
