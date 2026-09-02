@@ -1,4 +1,4 @@
-name: Build FF2 DLSS5 v5 reset diagnostic
+name: Build FF2 DLSS5 v6 clear test
 
 on:
   workflow_dispatch: {}
@@ -12,17 +12,17 @@ jobs:
       - name: Clone upstream helper
         run: git clone --depth 1 https://github.com/NIGos/dlss5-d3d12-fix.git upstream
 
-      - name: Apply FF2 v5 patch
+      - name: Apply FF2 v6 patch
         run: python patch_source.py upstream/src/dlss5-d3d12-fix.cpp
 
-      - name: Build addon
+      - name: Build
         shell: cmd
         run: |
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VS=%%i
           call "%VS%\Common7\Tools\VsDevCmd.bat" -arch=x64
           cd upstream\src
           rc /nologo version.rc
-          cl /nologo /LD /EHsc /O2 /MT dlss5-d3d12-fix.cpp /link /OUT:ff2-dlss5-format-fix.addon64 version.res kernel32.lib user32.lib
+          cl /nologo /std:c++17 /LD /EHsc /O2 /MT dlss5-d3d12-fix.cpp /link /OUT:ff2-dlss5-format-fix.addon64 version.res kernel32.lib user32.lib
 
       - name: Stage artifact
         shell: powershell
@@ -30,18 +30,8 @@ jobs:
           New-Item -ItemType Directory -Force stage | Out-Null
           Copy-Item upstream/src/ff2-dlss5-format-fix.addon64 stage/
           if (Test-Path dlss5-d3d12-fix.cfg) { Copy-Item dlss5-d3d12-fix.cfg stage/ }
-          @"
-          FF2 DLSS5 v5 forced-reset diagnostic
-
-          Keep preload_output=0
-          Keep copyback=1
-
-          This build forces Reset=1 during each host DLSS evaluate, then restores
-          the game's original Reset value afterward. It is a diagnostic build,
-          not intended as the final patch.
-          "@ | Set-Content stage/README-v5.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: FF2-DLSS5-v5-reset-test
+          name: FF2-DLSS5-v6-clear-test
           path: stage
