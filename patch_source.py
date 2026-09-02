@@ -156,29 +156,21 @@ new = '''                const bool bad_codec_format = !CodecFormatSupported(dev
 '''
 repl(old, new, "output substitution")
 
-old = '''                    if (PreloadOutput())
-                    {
-                        Transition(list, orig_out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                   D3D12_RESOURCE_STATE_COPY_SOURCE);
-                        ToState(list, g_sub_out, D3D12_RESOURCE_STATE_COPY_DEST);
-                        CopyMip0(list, g_sub_out.tex, orig_out);
-                        Transition(list, orig_out, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                    }
-                    // NGX writes the output through a UAV, so hand it over in
+# Insert the clear between the end of the existing PreloadOutput block and the
+# stable "NGX writes the output through a UAV" comment. This deliberately avoids
+# exact-matching the whole upstream block, which has changed comments/spacing.
+preload_pos = s.find("                    if (PreloadOutput())")
+if preload_pos < 0:
+    raise SystemExit("ERROR: PreloadOutput block not found")
+
+uav_comment = """                    // NGX writes the output through a UAV, so hand it over in
                     // that state exactly as the game would have.
-                    ToState(list, g_sub_out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-'''
-new = '''                    if (PreloadOutput())
-                    {
-                        Transition(list, orig_out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                   D3D12_RESOURCE_STATE_COPY_SOURCE);
-                        ToState(list, g_sub_out, D3D12_RESOURCE_STATE_COPY_DEST);
-                        CopyMip0(list, g_sub_out.tex, orig_out);
-                        Transition(list, orig_out, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                    }
-                    else if (g_sub_out.fmt == DXGI_FORMAT_R16G16B16A16_FLOAT &&
+"""
+comment_pos = s.find(uav_comment, preload_pos)
+if comment_pos < 0:
+    raise SystemExit("ERROR: output UAV comment not found after PreloadOutput block")
+
+clear_code = """                    else if (g_sub_out.fmt == DXGI_FORMAT_R16G16B16A16_FLOAT &&
                              EnsureClearRTV(dev, g_sub_out.tex))
                     {
                         ToState(list, g_sub_out, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -187,11 +179,11 @@ new = '''                    if (PreloadOutput())
                         if (n <= 6 || (n % 600) == 0)
                             Log("  FF2/v6 cleared substitute to finite black alpha=1 before DLSS");
                     }
-                    // NGX writes the output through a UAV, so hand it over in
-                    // that state exactly as the game would have.
-                    ToState(list, g_sub_out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-'''
-repl(old, new, "preload clear")
+"""
+
+# The comment immediately follows the closing brace of the existing if block,
+# so inserting here forms a valid if (...) { ... } else if (...) { ... } chain.
+s = s[:comment_pos] + clear_code + s[comment_pos:]
 
 old = '''    auto *list = static_cast<ID3D12GraphicsCommandList *>(cmdlist);
     auto *par  = const_cast<NVSDK_NGX_Parameter *>(p);
