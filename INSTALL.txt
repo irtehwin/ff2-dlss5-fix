@@ -1,0 +1,18 @@
+FF2 DLSS5 FORMAT-9 TEST BUILD
+
+Copy these beside FatalFrameII.exe:
+  ff2-dlss5-format-fix.addon64
+  dlss5-d3d12-fix.cfg
+
+Keep your existing renodx-dlss5.addon64, nvngx_dlssnr.dll,
+nvngx_dlss.dll and dxgi.dll.
+
+Keep renodx-dlss5.addon64 as LoadFromDllMain in ReShade.ini.
+The FF2 helper should load normally as a second ReShade add-on.
+
+After ONE gameplay test, send back:
+  ReShade.log
+  dlss5-d3d12-fix.log
+
+If the game crashes, freezes, or the GPU driver resets, remove
+ff2-dlss5-format-fix.addon64 before launching again.
