@@ -185,14 +185,10 @@ clear_code = """                    else if (g_sub_out.fmt == DXGI_FORMAT_R16G16
 # so inserting here forms a valid if (...) { ... } else if (...) { ... } chain.
 s = s[:comment_pos] + clear_code + s[comment_pos:]
 
-old = '''    auto *list = static_cast<ID3D12GraphicsCommandList *>(cmdlist);
-    auto *par  = const_cast<NVSDK_NGX_Parameter *>(p);
-
-    // Deliberately NOT held across the forwarded call.
-'''
-new = '''    auto *list = static_cast<ID3D12GraphicsCommandList *>(cmdlist);
-    auto *par  = const_cast<NVSDK_NGX_Parameter *>(p);
-
+par_line = '    auto *par  = const_cast<NVSDK_NGX_Parameter *>(p);\n'
+if par_line not in s:
+    raise SystemExit("ERROR: par line not found")
+s = s.replace(par_line, par_line + '''
     int original_reset = 0;
     bool forced_reset = false;
     if (par != nullptr && ShouldSubstitute(handle) &&
@@ -203,10 +199,7 @@ new = '''    auto *list = static_cast<ID3D12GraphicsCommandList *>(cmdlist);
         if (n <= 6 || (n % 600) == 0)
             Log("  FF2/v6 forced Reset=1 (original=%d)", original_reset);
     }
-
-    // Deliberately NOT held across the forwarded call.
-'''
-repl(old, new, "reset insertion")
+''', 1)
 
 old = '''    HookRestore(g_hook);
     LeaveCriticalSection(&g_hook_cs);
