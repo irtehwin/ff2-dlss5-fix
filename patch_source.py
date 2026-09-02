@@ -2,12 +2,20 @@ from pathlib import Path
 import sys
 
 if len(sys.argv) != 2:
-    raise SystemExit('usage: patch_source_v5.py <dlss5-d3d12-fix.cpp>')
+    raise SystemExit("usage: patch_source_v6.py <dlss5-d3d12-fix.cpp>")
 
 path = Path(sys.argv[1])
-s = path.read_text(encoding='utf-8')
+s = path.read_text(encoding="utf-8")
 
-# --- FF2 FLOAT bridge (known-good format choice) ---
+def repl(old, new, name):
+    global s
+    if old not in s:
+        raise SystemExit(f"ERROR: {name} anchor not found")
+    s = s.replace(old, new, 1)
+
+repl('#define PROBE_VERSION "2.6.1"',
+     '#define PROBE_VERSION "2.6.1-ff2.6-clear-reset"', "version")
+
 old = '''static bool EnsureSub(SubTex &s, ID3D12Device *dev, const D3D12_RESOURCE_DESC &src,
                       const char *label)
 {
@@ -49,33 +57,90 @@ static bool EnsureSub(SubTex &s, ID3D12Device *dev, const D3D12_RESOURCE_DESC &s
         s.fmt == codec_fmt)
         return true;
 '''
-if old not in s: raise SystemExit('ERROR: EnsureSub anchor not found')
-s = s.replace(old, new, 1)
+repl(old, new, "EnsureSub")
 
 old = '''    D3D12_RESOURCE_DESC d = src;
     d.MipLevels = 1;                                        // the whole point
     d.Flags     = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    d.Layout    = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 '''
 new = '''    D3D12_RESOURCE_DESC d = src;
     d.MipLevels = 1;
     d.Format    = codec_fmt;
     d.Flags     = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (_stricmp(label, "Output") == 0)
+        d.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    d.Layout    = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 '''
-if old not in s: raise SystemExit('ERROR: resource desc anchor not found')
-s = s.replace(old, new, 1)
+repl(old, new, "resource desc")
 
-old = '''    s.fmt    = src.Format;
+old = '''    s.width  = src.Width;
+    s.height = src.Height;
+    s.fmt    = src.Format;
     s.state  = D3D12_RESOURCE_STATE_COMMON;
     Log("  %s: single-mip substitute ready, %llux%u fmt=%u", label, s.width, s.height, s.fmt);
+    return true;
+}
 '''
-new = '''    s.fmt    = codec_fmt;
+new = '''    s.width  = src.Width;
+    s.height = src.Height;
+    s.fmt    = codec_fmt;
     s.state  = D3D12_RESOURCE_STATE_COMMON;
     Log("  %s: substitute ready, %llux%u srcfmt=%u codecfmt=%u%s",
         label, s.width, s.height, src.Format, s.fmt,
         src.Format != s.fmt ? "  <== FF2 FLOAT bridge active" : "");
+    return true;
+}
 '''
-if old not in s: raise SystemExit('ERROR: substitute finish anchor not found')
-s = s.replace(old, new, 1)
+repl(old, new, "EnsureSub finish")
+
+old = '''static SubTex g_sub_out;
+static SubTex g_sub_depth;
+static int    g_fix = -1;
+'''
+new = '''static SubTex g_sub_out;
+static SubTex g_sub_depth;
+static int    g_fix = -1;
+
+static ID3D12DescriptorHeap *g_ff2_clear_rtv_heap = nullptr;
+static D3D12_CPU_DESCRIPTOR_HANDLE g_ff2_clear_rtv = {};
+static ID3D12Resource *g_ff2_clear_rtv_resource = nullptr;
+
+static bool EnsureClearRTV(ID3D12Device *dev, ID3D12Resource *res)
+{
+    if (dev == nullptr || res == nullptr) return false;
+    if (g_ff2_clear_rtv_heap != nullptr && g_ff2_clear_rtv_resource == res)
+        return true;
+
+    D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    hd.NumDescriptors = 1;
+
+    ID3D12DescriptorHeap *heap = nullptr;
+    if (FAILED(dev->CreateDescriptorHeap(&hd, __uuidof(ID3D12DescriptorHeap),
+                                         reinterpret_cast<void **>(&heap))) ||
+        heap == nullptr)
+        return false;
+
+    D3D12_RENDER_TARGET_VIEW_DESC vd = {};
+    vd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    vd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    vd.Texture2D.MipSlice = 0;
+    vd.Texture2D.PlaneSlice = 0;
+
+    const D3D12_CPU_DESCRIPTOR_HANDLE h = heap->GetCPUDescriptorHandleForHeapStart();
+    dev->CreateRenderTargetView(res, &vd, h);
+
+    // This diagnostic keeps old one-descriptor heaps alive for process lifetime.
+    // They are tiny, and this avoids releasing descriptor storage before GPU work completes.
+    g_ff2_clear_rtv_heap = heap;
+    g_ff2_clear_rtv = h;
+    g_ff2_clear_rtv_resource = res;
+    Log("  FF2/v6 clear RTV ready for FLOAT substitute");
+    return true;
+}
+'''
+repl(old, new, "SubTex globals")
 
 old = '''                if (SubOutput() && d.MipLevels > 1 && EnsureSub(g_sub_out, dev, d, "Output"))
                 {
@@ -85,14 +150,87 @@ new = '''                const bool bad_codec_format = !CodecFormatSupported(dev
                 if (SubOutput() && needs_output_bridge &&
                     EnsureSub(g_sub_out, dev, d, "Output"))
                 {
-                    if (bad_codec_format && (n <= 6 || (n % 3600) == 0))
-                        Log("  FF2/v5 output bridge: fmt=%u -> codec fmt=%u",
+                    if (bad_codec_format && (n <= 6 || (n % 600) == 0))
+                        Log("  FF2/v6 output bridge: fmt=%u -> codec fmt=%u",
                             d.Format, g_sub_out.fmt);
 '''
-if old not in s: raise SystemExit('ERROR: output substitution anchor not found')
-s = s.replace(old, new, 1)
+repl(old, new, "output substitution")
 
-# --- RenoDX v4.7 readiness fix ---
+old = '''                    if (PreloadOutput())
+                    {
+                        Transition(list, orig_out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                   D3D12_RESOURCE_STATE_COPY_SOURCE);
+                        ToState(list, g_sub_out, D3D12_RESOURCE_STATE_COPY_DEST);
+                        CopyMip0(list, g_sub_out.tex, orig_out);
+                        Transition(list, orig_out, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    }
+                    // NGX writes the output through a UAV, so hand it over in
+                    // that state exactly as the game would have.
+                    ToState(list, g_sub_out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+'''
+new = '''                    if (PreloadOutput())
+                    {
+                        Transition(list, orig_out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                   D3D12_RESOURCE_STATE_COPY_SOURCE);
+                        ToState(list, g_sub_out, D3D12_RESOURCE_STATE_COPY_DEST);
+                        CopyMip0(list, g_sub_out.tex, orig_out);
+                        Transition(list, orig_out, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    }
+                    else if (g_sub_out.fmt == DXGI_FORMAT_R16G16B16A16_FLOAT &&
+                             EnsureClearRTV(dev, g_sub_out.tex))
+                    {
+                        ToState(list, g_sub_out, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                        const FLOAT clear_rgba[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+                        list->ClearRenderTargetView(g_ff2_clear_rtv, clear_rgba, 0, nullptr);
+                        if (n <= 6 || (n % 600) == 0)
+                            Log("  FF2/v6 cleared substitute to finite black alpha=1 before DLSS");
+                    }
+                    // NGX writes the output through a UAV, so hand it over in
+                    // that state exactly as the game would have.
+                    ToState(list, g_sub_out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+'''
+repl(old, new, "preload clear")
+
+old = '''    auto *list = static_cast<ID3D12GraphicsCommandList *>(cmdlist);
+    auto *par  = const_cast<NVSDK_NGX_Parameter *>(p);
+
+    // Deliberately NOT held across the forwarded call.
+'''
+new = '''    auto *list = static_cast<ID3D12GraphicsCommandList *>(cmdlist);
+    auto *par  = const_cast<NVSDK_NGX_Parameter *>(p);
+
+    int original_reset = 0;
+    bool forced_reset = false;
+    if (par != nullptr && ShouldSubstitute(handle) &&
+        par->Get("Reset", &original_reset) == NGX_SUCCESS)
+    {
+        par->Set("Reset", 1);
+        forced_reset = true;
+        if (n <= 6 || (n % 600) == 0)
+            Log("  FF2/v6 forced Reset=1 (original=%d)", original_reset);
+    }
+
+    // Deliberately NOT held across the forwarded call.
+'''
+repl(old, new, "reset insertion")
+
+old = '''    HookRestore(g_hook);
+    LeaveCriticalSection(&g_hook_cs);
+
+    EnterCriticalSection(&g_state_cs);
+'''
+new = '''    HookRestore(g_hook);
+    LeaveCriticalSection(&g_hook_cs);
+
+    if (forced_reset)
+        par->Set("Reset", original_reset);
+
+    EnterCriticalSection(&g_state_cs);
+'''
+repl(old, new, "reset restore")
+
 old = '''    void *eval = reinterpret_cast<void *>(
         GetProcAddress(ngx, "NVSDK_NGX_D3D12_EvaluateFeature"));
     if (eval == nullptr || !IsDetoured(eval)) return;
@@ -102,72 +240,15 @@ new = '''    void *eval = reinterpret_cast<void *>(
     if (eval == nullptr) return;
     if (GetModuleHandleW(L"nvngx_dlssnr.dll") == nullptr) return;
 '''
-if old not in s: raise SystemExit('ERROR: readiness anchor not found')
-s = s.replace(old, new, 1)
+repl(old, new, "RenoDX readiness")
 
 old = '''    Log("Entry point is already detoured by another add-on. Installing "
         "downstream of it.");
 '''
-new = '''    Log("FF2/RenoDX v4.7 mode: NR runtime loaded; installing outer NGX "
-        "hook for FLOAT bridge + forced-reset diagnostic.");
+new = '''    Log("FF2/RenoDX v4.7 mode: NR runtime loaded; installing outer NGX hook "
+        "for FLOAT bridge + reset + clean-output diagnostic.");
 '''
-if old not in s: raise SystemExit('ERROR: hook log anchor not found')
-s = s.replace(old, new, 1)
+repl(old, new, "install log")
 
-# --- v5 diagnostic: force Reset=1 for each DLSS/RR evaluate while RenoDX sees it ---
-old = '''    auto *par  = const_cast<NVSDK_NGX_Parameter *>(p);
-'''
-new = '''    auto *par  = const_cast<NVSDK_NGX_Parameter *>(p);
-
-    int original_reset = 0;
-    bool restore_reset = false;
-'''
-if old not in s: raise SystemExit('ERROR: par anchor not found')
-s = s.replace(old, new, 1)
-
-old = '''    const bool allowed = ShouldSubstitute(handle);
-    if (n <= 6 || (n % 3600) == 0)
-        Log("  evaluate handle=%p feature id=%d, substitution %s", handle,
-            FeatureIdOf(handle), allowed ? "allowed" : "skipped");
-'''
-new = '''    const bool allowed = ShouldSubstitute(handle);
-
-    // Diagnostic only: force a temporal reset on the host DLSS evaluate.
-    // RenoDX derives its inline feature-18 pass from this parameter block, so
-    // this tests whether accumulated NR history is the source of the green grain.
-    if (allowed && par != nullptr && par->Get("Reset", &original_reset) == NGX_SUCCESS)
-    {
-        par->Set("Reset", 1);
-        restore_reset = true;
-        if (n <= 6 || (n % 600) == 0)
-            Log("  FF2/v5 forced Reset=1 (original=%d) for temporal-history test", original_reset);
-    }
-
-    if (n <= 6 || (n % 3600) == 0)
-        Log("  evaluate handle=%p feature id=%d, substitution %s", handle,
-            FeatureIdOf(handle), allowed ? "allowed" : "skipped");
-'''
-if old not in s: raise SystemExit('ERROR: allowed anchor not found')
-s = s.replace(old, new, 1)
-
-old = '''    // Always hand the block back exactly as it was found.
-    if (did_out) par->Set("Output", orig_out);
-    if (did_dep) par->Set("Depth", orig_dep);
-
-    LeaveCriticalSection(&g_state_cs);
-'''
-new = '''    // Always hand the block back exactly as it was found.
-    if (did_out) par->Set("Output", orig_out);
-    if (did_dep) par->Set("Depth", orig_dep);
-    if (restore_reset) par->Set("Reset", original_reset);
-
-    LeaveCriticalSection(&g_state_cs);
-'''
-if old not in s: raise SystemExit('ERROR: restore anchor not found')
-s = s.replace(old, new, 1)
-
-s = s.replace('#define PROBE_VERSION "2.6.1"',
-              '#define PROBE_VERSION "2.6.1-ff2.5-reset"', 1)
-
-path.write_text(s, encoding='utf-8')
-print('FF2 v5 applied: FLOAT bridge + RenoDX hook fix + forced Reset=1 diagnostic.')
+path.write_text(s, encoding="utf-8")
+print("FF2 v6 applied: FLOAT bridge + Reset=1 + zero/alpha1 output-clear diagnostic.")
