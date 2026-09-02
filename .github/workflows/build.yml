@@ -1,8 +1,7 @@
 
 name: Build FF2 DLSS5 format bridge
 
-on:
-  workflow_dispatch:
+on: [workflow_dispatch]
 
 jobs:
   build:
