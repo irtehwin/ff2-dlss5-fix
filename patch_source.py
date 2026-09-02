@@ -115,22 +115,14 @@ if old not in s: raise SystemExit('ERROR: hook log anchor not found')
 s = s.replace(old, new, 1)
 
 # --- v5 diagnostic: force Reset=1 for each DLSS/RR evaluate while RenoDX sees it ---
-old = '''    ID3D12Resource *orig_out = nullptr;
-    ID3D12Resource *orig_dep = nullptr;
-    bool did_out = false, did_dep = false;
-    auto *list = static_cast<ID3D12GraphicsCommandList *>(cmdlist);
-    auto *par  = const_cast<NVSDK_NGX_Parameter *>(p);
+old = '''    auto *par  = const_cast<NVSDK_NGX_Parameter *>(p);
 '''
-new = '''    ID3D12Resource *orig_out = nullptr;
-    ID3D12Resource *orig_dep = nullptr;
-    bool did_out = false, did_dep = false;
-    auto *list = static_cast<ID3D12GraphicsCommandList *>(cmdlist);
-    auto *par  = const_cast<NVSDK_NGX_Parameter *>(p);
+new = '''    auto *par  = const_cast<NVSDK_NGX_Parameter *>(p);
 
     int original_reset = 0;
     bool restore_reset = false;
 '''
-if old not in s: raise SystemExit('ERROR: evaluate locals anchor not found')
+if old not in s: raise SystemExit('ERROR: par anchor not found')
 s = s.replace(old, new, 1)
 
 old = '''    const bool allowed = ShouldSubstitute(handle);
