@@ -2,7 +2,7 @@ from pathlib import Path
 import sys
 
 if len(sys.argv) != 2:
-    raise SystemExit("usage: patch_source_v2.py <dlss5-d3d12-fix.cpp>")
+    raise SystemExit("usage: patch_source_v3_unorm.py <dlss5-d3d12-fix.cpp>")
 
 path = Path(sys.argv[1])
 s = path.read_text(encoding="utf-8")
@@ -29,9 +29,13 @@ replacement = """static bool CodecFormatSupported(ID3D12Device *dev, DXGI_FORMAT
 static DXGI_FORMAT CodecCompatibleFormat(ID3D12Device *dev, DXGI_FORMAT fmt)
 {
     if (CodecFormatSupported(dev, fmt)) return fmt;
+
+    // FF2 diagnostic v3:
+    // Test the UNORM sibling of R16G16B16A16_TYPELESS instead of FLOAT.
     if (fmt == DXGI_FORMAT_R16G16B16A16_TYPELESS &&
-        CodecFormatSupported(dev, DXGI_FORMAT_R16G16B16A16_FLOAT))
-        return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        CodecFormatSupported(dev, DXGI_FORMAT_R16G16B16A16_UNORM))
+        return DXGI_FORMAT_R16G16B16A16_UNORM;
+
     return DXGI_FORMAT_UNKNOWN;
 }
 
@@ -51,7 +55,7 @@ static bool EnsureSub(SubTex &s, ID3D12Device *dev, const D3D12_RESOURCE_DESC &s
 """
 
 if needle not in s:
-    raise SystemExit("ERROR: EnsureSub anchor not found; upstream source changed.")
+    raise SystemExit("ERROR: EnsureSub anchor not found.")
 s = s.replace(needle, replacement, 1)
 
 old_desc = """    D3D12_RESOURCE_DESC d = src;
@@ -75,7 +79,7 @@ new_finish = """    s.fmt    = codec_fmt;
     s.state  = D3D12_RESOURCE_STATE_COMMON;
     Log("  %s: substitute ready, %llux%u srcfmt=%u codecfmt=%u%s",
         label, s.width, s.height, src.Format, s.fmt,
-        src.Format != s.fmt ? "  <== FF2 typed-format bridge active" : "");
+        src.Format != s.fmt ? "  <== FF2 v3 UNORM bridge active" : "");
 """
 if old_finish not in s:
     raise SystemExit("ERROR: substitute-finish anchor not found.")
@@ -90,7 +94,7 @@ new_output = """                const bool bad_codec_format = !CodecFormatSuppor
                     EnsureSub(g_sub_out, dev, d, "Output"))
                 {
                     if (bad_codec_format && (n <= 6 || (n % 3600) == 0))
-                        Log("  FF2/output bridge: fmt=%u -> codec fmt=%u",
+                        Log("  FF2/v3 output bridge: fmt=%u -> codec fmt=%u",
                             d.Format, g_sub_out.fmt);
 """
 if old_output not in s:
@@ -104,9 +108,6 @@ old_gate = """    void *eval = reinterpret_cast<void *>(
 new_gate = """    void *eval = reinterpret_cast<void *>(
         GetProcAddress(ngx, "NVSDK_NGX_D3D12_EvaluateFeature"));
     if (eval == nullptr) return;
-
-    // RenoDX DLSS5 v4.7 hooks NGX without inline-detouring this export.
-    // Wait for its NR runtime, which loads only after RenoDX has installed hooks.
     if (GetModuleHandleW(L"nvngx_dlssnr.dll") == nullptr) return;
 """
 if old_gate not in s:
@@ -117,14 +118,14 @@ old_log = """    Log("Entry point is already detoured by another add-on. Install
         "downstream of it.");
 """
 new_log = """    Log("FF2/RenoDX v4.7 mode: NR runtime loaded; installing outer NGX "
-        "export hook for format substitution.");
+        "export hook for UNORM format test.");
 """
 if old_log not in s:
     raise SystemExit("ERROR: hook-install log anchor not found.")
 s = s.replace(old_log, new_log, 1)
 
 s = s.replace('#define PROBE_VERSION "2.6.1"',
-              '#define PROBE_VERSION "2.6.1-ff2.2"', 1)
+              '#define PROBE_VERSION "2.6.1-ff2.3-unorm"', 1)
 
 path.write_text(s, encoding="utf-8")
-print("FF2 v2 patch applied.")
+print("FF2 v3 UNORM diagnostic patch applied.")
