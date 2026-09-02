@@ -1,6 +1,9 @@
 from pathlib import Path
 import sys
 
+if len(sys.argv) != 2:
+    raise SystemExit("usage: patch_source_v2.py <dlss5-d3d12-fix.cpp>")
+
 path = Path(sys.argv[1])
 s = path.read_text(encoding="utf-8")
 
@@ -48,36 +51,40 @@ static bool EnsureSub(SubTex &s, ID3D12Device *dev, const D3D12_RESOURCE_DESC &s
 """
 
 if needle not in s:
-    raise SystemExit("EnsureSub anchor not found; upstream changed.")
+    raise SystemExit("ERROR: EnsureSub anchor not found; upstream source changed.")
 s = s.replace(needle, replacement, 1)
 
-s = s.replace(
-"""    D3D12_RESOURCE_DESC d = src;
+old_desc = """    D3D12_RESOURCE_DESC d = src;
     d.MipLevels = 1;                                        // the whole point
     d.Flags     = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-""",
-"""    D3D12_RESOURCE_DESC d = src;
+"""
+new_desc = """    D3D12_RESOURCE_DESC d = src;
     d.MipLevels = 1;
     d.Format    = codec_fmt;
     d.Flags     = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-""", 1)
+"""
+if old_desc not in s:
+    raise SystemExit("ERROR: resource-desc anchor not found.")
+s = s.replace(old_desc, new_desc, 1)
 
-s = s.replace(
-"""    s.fmt    = src.Format;
+old_finish = """    s.fmt    = src.Format;
     s.state  = D3D12_RESOURCE_STATE_COMMON;
     Log("  %s: single-mip substitute ready, %llux%u fmt=%u", label, s.width, s.height, s.fmt);
-""",
-"""    s.fmt    = codec_fmt;
+"""
+new_finish = """    s.fmt    = codec_fmt;
     s.state  = D3D12_RESOURCE_STATE_COMMON;
     Log("  %s: substitute ready, %llux%u srcfmt=%u codecfmt=%u%s",
         label, s.width, s.height, src.Format, s.fmt,
         src.Format != s.fmt ? "  <== FF2 typed-format bridge active" : "");
-""", 1)
+"""
+if old_finish not in s:
+    raise SystemExit("ERROR: substitute-finish anchor not found.")
+s = s.replace(old_finish, new_finish, 1)
 
-old = """                if (SubOutput() && d.MipLevels > 1 && EnsureSub(g_sub_out, dev, d, "Output"))
+old_output = """                if (SubOutput() && d.MipLevels > 1 && EnsureSub(g_sub_out, dev, d, "Output"))
                 {
 """
-new = """                const bool bad_codec_format = !CodecFormatSupported(dev, d.Format);
+new_output = """                const bool bad_codec_format = !CodecFormatSupported(dev, d.Format);
                 const bool needs_output_bridge = d.MipLevels > 1 || bad_codec_format;
                 if (SubOutput() && needs_output_bridge &&
                     EnsureSub(g_sub_out, dev, d, "Output"))
@@ -86,9 +93,38 @@ new = """                const bool bad_codec_format = !CodecFormatSupported(dev
                         Log("  FF2/output bridge: fmt=%u -> codec fmt=%u",
                             d.Format, g_sub_out.fmt);
 """
-if old not in s:
-    raise SystemExit("Output-substitution anchor not found; upstream changed.")
-s = s.replace(old, new, 1)
+if old_output not in s:
+    raise SystemExit("ERROR: output substitution anchor not found.")
+s = s.replace(old_output, new_output, 1)
+
+old_gate = """    void *eval = reinterpret_cast<void *>(
+        GetProcAddress(ngx, "NVSDK_NGX_D3D12_EvaluateFeature"));
+    if (eval == nullptr || !IsDetoured(eval)) return;
+"""
+new_gate = """    void *eval = reinterpret_cast<void *>(
+        GetProcAddress(ngx, "NVSDK_NGX_D3D12_EvaluateFeature"));
+    if (eval == nullptr) return;
+
+    // RenoDX DLSS5 v4.7 hooks NGX without inline-detouring this export.
+    // Wait for its NR runtime, which loads only after RenoDX has installed hooks.
+    if (GetModuleHandleW(L"nvngx_dlssnr.dll") == nullptr) return;
+"""
+if old_gate not in s:
+    raise SystemExit("ERROR: NGX readiness-gate anchor not found.")
+s = s.replace(old_gate, new_gate, 1)
+
+old_log = """    Log("Entry point is already detoured by another add-on. Installing "
+        "downstream of it.");
+"""
+new_log = """    Log("FF2/RenoDX v4.7 mode: NR runtime loaded; installing outer NGX "
+        "export hook for format substitution.");
+"""
+if old_log not in s:
+    raise SystemExit("ERROR: hook-install log anchor not found.")
+s = s.replace(old_log, new_log, 1)
+
+s = s.replace('#define PROBE_VERSION "2.6.1"',
+              '#define PROBE_VERSION "2.6.1-ff2.2"', 1)
 
 path.write_text(s, encoding="utf-8")
-print("FF2 patch applied.")
+print("FF2 v2 patch applied.")
