@@ -2,18 +2,12 @@ from pathlib import Path
 import sys
 
 if len(sys.argv) != 2:
-    raise SystemExit('usage: patch_source_v4.py <dlss5-d3d12-fix.cpp>')
+    raise SystemExit('usage: patch_source_v5.py <dlss5-d3d12-fix.cpp>')
 
 path = Path(sys.argv[1])
 s = path.read_text(encoding='utf-8')
 
-# ReShade SDK header for resource-view diagnostics
-anchor = '#include <cstdint>\n'
-if anchor not in s:
-    raise SystemExit('ERROR: include anchor not found')
-s = s.replace(anchor, anchor + '#include <reshade.hpp>\n', 1)
-
-# Working FF2 FLOAT bridge
+# --- FF2 FLOAT bridge (known-good format choice) ---
 old = '''static bool EnsureSub(SubTex &s, ID3D12Device *dev, const D3D12_RESOURCE_DESC &src,
                       const char *label)
 {
@@ -50,12 +44,12 @@ static bool EnsureSub(SubTex &s, ID3D12Device *dev, const D3D12_RESOURCE_DESC &s
         Log("  %s: no codec-compatible typed substitute for fmt=%u", label, src.Format);
         return false;
     }
+
     if (s.tex != nullptr && s.width == src.Width && s.height == src.Height &&
         s.fmt == codec_fmt)
         return true;
 '''
-if old not in s:
-    raise SystemExit('ERROR: EnsureSub anchor not found')
+if old not in s: raise SystemExit('ERROR: EnsureSub anchor not found')
 s = s.replace(old, new, 1)
 
 old = '''    D3D12_RESOURCE_DESC d = src;
@@ -67,8 +61,7 @@ new = '''    D3D12_RESOURCE_DESC d = src;
     d.Format    = codec_fmt;
     d.Flags     = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 '''
-if old not in s:
-    raise SystemExit('ERROR: resource-desc anchor not found')
+if old not in s: raise SystemExit('ERROR: resource desc anchor not found')
 s = s.replace(old, new, 1)
 
 old = '''    s.fmt    = src.Format;
@@ -81,8 +74,7 @@ new = '''    s.fmt    = codec_fmt;
         label, s.width, s.height, src.Format, s.fmt,
         src.Format != s.fmt ? "  <== FF2 FLOAT bridge active" : "");
 '''
-if old not in s:
-    raise SystemExit('ERROR: substitute-finish anchor not found')
+if old not in s: raise SystemExit('ERROR: substitute finish anchor not found')
 s = s.replace(old, new, 1)
 
 old = '''                if (SubOutput() && d.MipLevels > 1 && EnsureSub(g_sub_out, dev, d, "Output"))
@@ -94,14 +86,13 @@ new = '''                const bool bad_codec_format = !CodecFormatSupported(dev
                     EnsureSub(g_sub_out, dev, d, "Output"))
                 {
                     if (bad_codec_format && (n <= 6 || (n % 3600) == 0))
-                        Log("  FF2/v4 output bridge: fmt=%u -> codec fmt=%u",
+                        Log("  FF2/v5 output bridge: fmt=%u -> codec fmt=%u",
                             d.Format, g_sub_out.fmt);
 '''
-if old not in s:
-    raise SystemExit('ERROR: output substitution anchor not found')
+if old not in s: raise SystemExit('ERROR: output substitution anchor not found')
 s = s.replace(old, new, 1)
 
-# RenoDX v4.7 readiness fix
+# --- RenoDX v4.7 readiness fix ---
 old = '''    void *eval = reinterpret_cast<void *>(
         GetProcAddress(ngx, "NVSDK_NGX_D3D12_EvaluateFeature"));
     if (eval == nullptr || !IsDetoured(eval)) return;
@@ -111,98 +102,80 @@ new = '''    void *eval = reinterpret_cast<void *>(
     if (eval == nullptr) return;
     if (GetModuleHandleW(L"nvngx_dlssnr.dll") == nullptr) return;
 '''
-if old not in s:
-    raise SystemExit('ERROR: NGX readiness anchor not found')
+if old not in s: raise SystemExit('ERROR: readiness anchor not found')
 s = s.replace(old, new, 1)
 
 old = '''    Log("Entry point is already detoured by another add-on. Installing "
         "downstream of it.");
 '''
 new = '''    Log("FF2/RenoDX v4.7 mode: NR runtime loaded; installing outer NGX "
-        "export hook for FLOAT bridge + view diagnostics.");
+        "hook for FLOAT bridge + forced-reset diagnostic.");
 '''
-if old not in s:
-    raise SystemExit('ERROR: hook log anchor not found')
+if old not in s: raise SystemExit('ERROR: hook log anchor not found')
 s = s.replace(old, new, 1)
 
-# Resource-view diagnostic callback
-insert_anchor = '''// ---------------------------------------------------------------------------
-// Inline hook
+# --- v5 diagnostic: force Reset=1 for each DLSS/RR evaluate while RenoDX sees it ---
+old = '''    ID3D12Resource *orig_out = nullptr;
+    ID3D12Resource *orig_dep = nullptr;
+    bool did_out = false, did_dep = false;
+    auto *list = static_cast<ID3D12GraphicsCommandList *>(cmdlist);
+    auto *par  = const_cast<NVSDK_NGX_Parameter *>(p);
 '''
-diag = r'''// ---------------------------------------------------------------------------
-// FF2 v4 resource-view diagnostics
-// ---------------------------------------------------------------------------
-static const char *ViewUsageName(reshade::api::resource_usage u)
-{
-    using U = reshade::api::resource_usage;
-    if (u == U::unordered_access) return "UAV";
-    if (u == U::render_target) return "RTV";
-    if (u == U::depth_stencil || u == U::depth_stencil_read || u == U::depth_stencil_write) return "DSV";
-    if (u == U::shader_resource || u == U::shader_resource_pixel || u == U::shader_resource_non_pixel) return "SRV";
-    return "OTHER";
-}
+new = '''    ID3D12Resource *orig_out = nullptr;
+    ID3D12Resource *orig_dep = nullptr;
+    bool did_out = false, did_dep = false;
+    auto *list = static_cast<ID3D12GraphicsCommandList *>(cmdlist);
+    auto *par  = const_cast<NVSDK_NGX_Parameter *>(p);
 
-static void OnInitResourceView(
-    reshade::api::device *device,
-    reshade::api::resource resource,
-    reshade::api::resource_usage usage,
-    const reshade::api::resource_view_desc &vd,
-    reshade::api::resource_view view)
-{
-    if (device == nullptr || device->get_api() != reshade::api::device_api::d3d12 || resource.handle == 0)
-        return;
-
-    auto *res = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(resource.handle));
-    D3D12_RESOURCE_DESC rd = {};
-    __try { rd = res->GetDesc(); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return; }
-
-    if (rd.Format != DXGI_FORMAT_R16G16B16A16_TYPELESS &&
-        rd.Format != DXGI_FORMAT_R32G8X24_TYPELESS &&
-        rd.Format != DXGI_FORMAT_R16G16_TYPELESS)
-        return;
-
-    Log("[VIEW] resource=%p basefmt=%u %llux%u usage=%s(0x%X) viewfmt=%u type=%u mip=%u levels=%u layer=%u layers=%u descriptor=0x%llX",
-        static_cast<void *>(res), static_cast<unsigned>(rd.Format),
-        static_cast<unsigned long long>(rd.Width), rd.Height,
-        ViewUsageName(usage), static_cast<unsigned>(usage),
-        static_cast<unsigned>(vd.format), static_cast<unsigned>(vd.type),
-        vd.texture.first_level, vd.texture.levels,
-        vd.texture.first_layer, vd.texture.layers,
-        static_cast<unsigned long long>(view.handle));
-}
-
+    int original_reset = 0;
+    bool restore_reset = false;
 '''
-if insert_anchor not in s:
-    raise SystemExit('ERROR: diagnostic insertion anchor not found')
-s = s.replace(insert_anchor, diag + insert_anchor, 1)
-
-old = '''        if (!RegisterWithReShade(module)) return FALSE;
-
-        FILE *f = nullptr;
-'''
-new = '''        if (!RegisterWithReShade(module)) return FALSE;
-        reshade::register_event<reshade::addon_event::init_resource_view>(&OnInitResourceView);
-
-        FILE *f = nullptr;
-'''
-if old not in s:
-    raise SystemExit('ERROR: registration anchor not found')
+if old not in s: raise SystemExit('ERROR: evaluate locals anchor not found')
 s = s.replace(old, new, 1)
 
-old = '''        ReportOutcome();
-        if (g_unregister != nullptr) g_unregister(g_self);
+old = '''    const bool allowed = ShouldSubstitute(handle);
+    if (n <= 6 || (n % 3600) == 0)
+        Log("  evaluate handle=%p feature id=%d, substitution %s", handle,
+            FeatureIdOf(handle), allowed ? "allowed" : "skipped");
 '''
-new = '''        ReportOutcome();
-        reshade::unregister_event<reshade::addon_event::init_resource_view>(&OnInitResourceView);
-        if (g_unregister != nullptr) g_unregister(g_self);
+new = '''    const bool allowed = ShouldSubstitute(handle);
+
+    // Diagnostic only: force a temporal reset on the host DLSS evaluate.
+    // RenoDX derives its inline feature-18 pass from this parameter block, so
+    // this tests whether accumulated NR history is the source of the green grain.
+    if (allowed && par != nullptr && par->Get("Reset", &original_reset) == NGX_SUCCESS)
+    {
+        par->Set("Reset", 1);
+        restore_reset = true;
+        if (n <= 6 || (n % 600) == 0)
+            Log("  FF2/v5 forced Reset=1 (original=%d) for temporal-history test", original_reset);
+    }
+
+    if (n <= 6 || (n % 3600) == 0)
+        Log("  evaluate handle=%p feature id=%d, substitution %s", handle,
+            FeatureIdOf(handle), allowed ? "allowed" : "skipped");
 '''
-if old not in s:
-    raise SystemExit('ERROR: unregister anchor not found')
+if old not in s: raise SystemExit('ERROR: allowed anchor not found')
+s = s.replace(old, new, 1)
+
+old = '''    // Always hand the block back exactly as it was found.
+    if (did_out) par->Set("Output", orig_out);
+    if (did_dep) par->Set("Depth", orig_dep);
+
+    LeaveCriticalSection(&g_state_cs);
+'''
+new = '''    // Always hand the block back exactly as it was found.
+    if (did_out) par->Set("Output", orig_out);
+    if (did_dep) par->Set("Depth", orig_dep);
+    if (restore_reset) par->Set("Reset", original_reset);
+
+    LeaveCriticalSection(&g_state_cs);
+'''
+if old not in s: raise SystemExit('ERROR: restore anchor not found')
 s = s.replace(old, new, 1)
 
 s = s.replace('#define PROBE_VERSION "2.6.1"',
-              '#define PROBE_VERSION "2.6.1-ff2.4-viewdiag"', 1)
+              '#define PROBE_VERSION "2.6.1-ff2.5-reset"', 1)
 
 path.write_text(s, encoding='utf-8')
-print('FF2 v4 diagnostic patch applied.')
+print('FF2 v5 applied: FLOAT bridge + RenoDX hook fix + forced Reset=1 diagnostic.')
